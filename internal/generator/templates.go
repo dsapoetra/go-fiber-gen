@@ -107,69 +107,191 @@ import (
 	"your-project-name/services"
 )
 
-type UserHandler struct {
-	userService *services.UserService
+// ExampleHandler demonstrates a basic handler structure
+type ExampleHandler struct {
+	exampleService *services.ExampleService
 }
 
-func NewUserHandler(userService *services.UserService) *UserHandler {
-	return &UserHandler{userService: userService}
+func NewExampleHandler(exampleService *services.ExampleService) *ExampleHandler {
+	return &ExampleHandler{exampleService: exampleService}
 }
 
-func (h *UserHandler) Register(c *fiber.Ctx) error {
-	var user models.User
-	if err := c.BodyParser(&user); err != nil {
+// Create demonstrates a POST endpoint
+func (h *ExampleHandler) Create(c *fiber.Ctx) error {
+	var item models.Example
+	if err := c.BodyParser(&item); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Invalid request body",
 		})
 	}
 
-	if err := h.userService.Register(&user); err != nil {
+	if err := h.exampleService.Create(&item); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to register user",
+			"error": "Failed to create item",
 		})
 	}
 
-	// Clear password before sending response
-	user.Password = ""
-	return c.Status(fiber.StatusCreated).JSON(user)
+	return c.Status(fiber.StatusCreated).JSON(item)
 }
 
-func (h *UserHandler) Login(c *fiber.Ctx) error {
-	var loginRequest struct {
-		Username string ` + "`json:\"username\"`" + `
-		Password string ` + "`json:\"password\"`" + `
-	}
-
-	if err := c.BodyParser(&loginRequest); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+// Get demonstrates a GET endpoint with path parameter
+func (h *ExampleHandler) Get(c *fiber.Ctx) error {
+	id := c.Params("id")
+	
+	item, err := h.exampleService.GetById(id)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Item not found",
 		})
 	}
 
-	token, err := h.userService.Login(loginRequest.Username, loginRequest.Password)
+	return c.JSON(item)
+}
+
+// List demonstrates a GET endpoint with query parameters
+func (h *ExampleHandler) List(c *fiber.Ctx) error {
+	limit := c.QueryInt("limit", 10)
+	offset := c.QueryInt("offset", 0)
+	
+	items, err := h.exampleService.List(limit, offset)
 	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Invalid credentials",
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to retrieve items",
 		})
 	}
 
 	return c.JSON(fiber.Map{
-		"token": token,
+		"items": items,
+		"metadata": fiber.Map{
+			"limit":  limit,
+			"offset": offset,
+		},
 	})
 }
 
-func (h *UserHandler) GetProfile(c *fiber.Ctx) error {
-	userId := c.Locals("userId").(int64)
+// Update demonstrates a PUT endpoint
+func (h *ExampleHandler) Update(c *fiber.Ctx) error {
+	id := c.Params("id")
 	
-	user, err := h.userService.GetUserById(userId)
-	if err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-			"error": "User not found",
+	var item models.Example
+	if err := c.BodyParser(&item); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
 		})
 	}
 
-	user.Password = "" // Clear password before sending response
-	return c.JSON(user)
+	if err := h.exampleService.Update(id, &item); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to update item",
+		})
+	}
+
+	return c.JSON(item)
+}
+
+// Delete demonstrates a DELETE endpoint
+func (h *ExampleHandler) Delete(c *fiber.Ctx) error {
+	id := c.Params("id")
+	
+	if err := h.exampleService.Delete(id); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to delete item",
+		})
+	}
+
+	return c.SendStatus(fiber.StatusNoContent)
+}
+
+// AuthenticatedEndpoint demonstrates using middleware and accessing context
+func (h *ExampleHandler) AuthenticatedEndpoint(c *fiber.Ctx) error {
+	// Example of accessing user ID from context (set by auth middleware)
+	userId := c.Locals("userId").(int64)
+	
+	data, err := h.exampleService.GetUserData(userId)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Data not found",
+		})
+	}
+
+	return c.JSON(data)
+}
+
+// FileUpload demonstrates handling file uploads
+func (h *ExampleHandler) FileUpload(c *fiber.Ctx) error {
+	file, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "No file provided",
+		})
+	}
+
+	// Example of saving file
+	if err := c.SaveFile(file, "./uploads/"+file.Filename); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to save file",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"filename": file.Filename,
+		"size":     file.Size,
+	})
+}
+
+// ValidationExample demonstrates request validation
+func (h *ExampleHandler) ValidationExample(c *fiber.Ctx) error {
+	var request struct {
+		Email    string ` + "`json:\"email\" validate:\"required,email\"`" + `
+		Username string ` + "`json:\"username\" validate:\"required,min=4,max=20\"`" + `
+		Age      int    ` + "`json:\"age\" validate:\"required,gte=18\"`" + `
+	}
+
+	if err := c.BodyParser(&request); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	// Example of custom validation
+	if err := validate.Struct(request); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Validation failed",
+			"details": err.Error(),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"message": "Validation successful",
+	})
+}
+
+// ErrorHandlingExample demonstrates error handling patterns
+func (h *ExampleHandler) ErrorHandlingExample(c *fiber.Ctx) error {
+	// Example of different error types
+	result, err := h.exampleService.DoSomething()
+	switch {
+	case err == services.ErrNotFound:
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Resource not found",
+		})
+	case err == services.ErrUnauthorized:
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Unauthorized access",
+		})
+	case err == services.ErrValidation:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Validation failed",
+		})
+	case err != nil:
+		// Log unexpected errors
+		log.Printf("Unexpected error: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Internal server error",
+		})
+	}
+
+	return c.JSON(result)
 }
 `
 
