@@ -95,6 +95,8 @@ func (g *Generator) createFiles(projectName string) error {
 		".env":                            envTemplate,
 		"go.mod":                          modTemplate,
 		"Makefile":                        makefileTemplate,
+		"services/user_service_test.go":   userServiceTestTemplate,
+		"handlers/user_handler_test.go":   userHandlerTestTemplate,
 	}
 
 	for file, content := range files {
