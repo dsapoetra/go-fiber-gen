@@ -103,6 +103,7 @@ func Connect(host, port, user, password, dbname string) (*sqlx.DB, error) {
 
 import (
 	"github.com/gofiber/fiber/v2"
+	"your-project-name/models"
 	"your-project-name/services"
 )
 
@@ -115,18 +116,60 @@ func NewUserHandler(userService *services.UserService) *UserHandler {
 }
 
 func (h *UserHandler) Register(c *fiber.Ctx) error {
-	// Implementation
-	return nil
+	var user models.User
+	if err := c.BodyParser(&user); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	if err := h.userService.Register(&user); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to register user",
+		})
+	}
+
+	// Clear password before sending response
+	user.Password = ""
+	return c.Status(fiber.StatusCreated).JSON(user)
 }
 
 func (h *UserHandler) Login(c *fiber.Ctx) error {
-	// Implementation
-	return nil
+	var loginRequest struct {
+		Username string ` + "`json:\"username\"`" + `
+		Password string ` + "`json:\"password\"`" + `
+	}
+
+	if err := c.BodyParser(&loginRequest); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	token, err := h.userService.Login(loginRequest.Username, loginRequest.Password)
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Invalid credentials",
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"token": token,
+	})
 }
 
 func (h *UserHandler) GetProfile(c *fiber.Ctx) error {
-	// Implementation
-	return nil
+	userId := c.Locals("userId").(int64)
+	
+	user, err := h.userService.GetUserById(userId)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "User not found",
+		})
+	}
+
+	user.Password = "" // Clear password before sending response
+	return c.JSON(user)
 }
 `
 
@@ -134,18 +177,34 @@ func (h *UserHandler) GetProfile(c *fiber.Ctx) error {
 
 import (
 	"github.com/gofiber/fiber/v2"
+	"strings"
 	"your-project-name/pkg/jwt"
 )
 
 func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		token := c.Get("Authorization")
-		if token == "" {
-			return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			return c.Status(401).JSON(fiber.Map{"error": "Authorization header required"})
 		}
 
+		// Check if the header starts with "Bearer "
+		parts := strings.Split(authHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid authorization header format"})
+		}
+
+		token := parts[1]
+		
 		// Validate token
-		// Implementation
+		claims, err := jwt.ValidateToken(token, "your-secret-key") // TODO: Use config for secret
+		if err != nil {
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
+		}
+
+		// Set user ID in context
+		userId := claims["user_id"].(float64)
+		c.Locals("userId", int64(userId))
 
 		return c.Next()
 	}
@@ -200,10 +259,20 @@ func GenerateToken(userId uint, secret string) (string, error) {
 	return token.SignedString([]byte(secret))
 }
 
-func ValidateToken(tokenString string, secret string) (*jwt.Token, error) {
-	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+func ValidateToken(tokenString string, secret string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		return claims, nil
+	}
+
+	return nil, err
 }
 `
 
@@ -253,14 +322,25 @@ func (r *UserRepository) FindByEmail(email string) (*models.User, error) {
 	}
 	return &user, nil
 }
+
+func (r *UserRepository) FindById(id int64) (*models.User, error) {
+	var user models.User
+	err := r.db.Get(&user, "SELECT * FROM users WHERE id = $1", id)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
 `
 
 	userServiceTemplate = `package services
 
 import (
+	"errors"
 	"your-project-name/models"
-	"your-project-name/repositories"
 	"your-project-name/pkg/hash"
+	"your-project-name/pkg/jwt"
+	"your-project-name/repositories"
 )
 
 type UserService struct {
@@ -272,6 +352,16 @@ func NewUserService(userRepo *repositories.UserRepository) *UserService {
 }
 
 func (s *UserService) Register(user *models.User) error {
+	// Check if username already exists
+	if _, err := s.userRepo.FindByUsername(user.Username); err == nil {
+		return errors.New("username already exists")
+	}
+
+	// Check if email already exists
+	if _, err := s.userRepo.FindByEmail(user.Email); err == nil {
+		return errors.New("email already exists")
+	}
+
 	hashedPassword, err := hash.HashPassword(user.Password)
 	if err != nil {
 		return err
@@ -279,6 +369,29 @@ func (s *UserService) Register(user *models.User) error {
 	
 	user.Password = hashedPassword
 	return s.userRepo.Create(user)
+}
+
+func (s *UserService) Login(username, password string) (string, error) {
+	user, err := s.userRepo.FindByUsername(username)
+	if err != nil {
+		return "", errors.New("invalid credentials")
+	}
+
+	if !hash.CheckPasswordHash(password, user.Password) {
+		return "", errors.New("invalid credentials")
+	}
+
+	// Generate JWT token
+	token, err := jwt.GenerateToken(uint(user.ID), "your-secret-key") // TODO: Use config for secret
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+func (s *UserService) GetUserById(userId int64) (*models.User, error) {
+	return s.userRepo.FindById(userId)
 }
 `
 
@@ -385,4 +498,323 @@ help:
 );`
 
 	initialMigrationDownTemplate = `DROP TABLE IF EXISTS users;`
+
+	userServiceTestTemplate = `package services
+
+	import (
+		"testing"
+		"errors"
+		"github.com/stretchr/testify/assert"
+		"github.com/stretchr/testify/mock"
+		"your-project-name/models"
+	)
+	
+	// MockUserRepository is a mock type for the UserRepository
+	type MockUserRepository struct {
+		mock.Mock
+	}
+	
+	func (m *MockUserRepository) Create(user *models.User) error {
+		args := m.Called(user)
+		return args.Error(0)
+	}
+	
+	func (m *MockUserRepository) FindByUsername(username string) (*models.User, error) {
+		args := m.Called(username)
+		if args.Get(0) == nil {
+			return nil, args.Error(1)
+		}
+		return args.Get(0).(*models.User), args.Error(1)
+	}
+	
+	func (m *MockUserRepository) FindByEmail(email string) (*models.User, error) {
+		args := m.Called(email)
+		if args.Get(0) == nil {
+			return nil, args.Error(1)
+		}
+		return args.Get(0).(*models.User), args.Error(1)
+	}
+	
+	func (m *MockUserRepository) FindById(id int64) (*models.User, error) {
+		args := m.Called(id)
+		if args.Get(0) == nil {
+			return nil, args.Error(1)
+		}
+		return args.Get(0).(*models.User), args.Error(1)
+	}
+	
+	func TestUserService_Register(t *testing.T) {
+		mockRepo := new(MockUserRepository)
+		service := NewUserService(mockRepo)
+	
+		tests := []struct {
+			name          string
+			user          *models.User
+			setupMocks    func()
+			expectedError error
+		}{
+			{
+				name: "Successful registration",
+				user: &models.User{
+					Username: "testuser",
+					Email:    "test@example.com",
+					Password: "password123",
+				},
+				setupMocks: func() {
+					mockRepo.On("FindByUsername", "testuser").Return(nil, errors.New("not found"))
+					mockRepo.On("FindByEmail", "test@example.com").Return(nil, errors.New("not found"))
+					mockRepo.On("Create", mock.AnythingOfType("*models.User")).Return(nil)
+				},
+				expectedError: nil,
+			},
+			{
+				name: "Username already exists",
+				user: &models.User{
+					Username: "existinguser",
+					Email:    "test@example.com",
+					Password: "password123",
+				},
+				setupMocks: func() {
+					mockRepo.On("FindByUsername", "existinguser").Return(&models.User{}, nil)
+				},
+				expectedError: errors.New("username already exists"),
+			},
+		}
+	
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				mockRepo.ExpectedCalls = nil
+				mockRepo.Calls = nil
+				tt.setupMocks()
+	
+				err := service.Register(tt.user)
+	
+				if tt.expectedError != nil {
+					assert.EqualError(t, err, tt.expectedError.Error())
+				} else {
+					assert.NoError(t, err)
+				}
+				mockRepo.AssertExpectations(t)
+			})
+		}
+	}
+	
+	func TestUserService_Login(t *testing.T) {
+		mockRepo := new(MockUserRepository)
+		service := NewUserService(mockRepo)
+	
+		tests := []struct {
+			name          string
+			username      string
+			password      string
+			setupMocks    func()
+			expectedToken string
+			expectedError error
+		}{
+			{
+				name:     "Successful login",
+				username: "testuser",
+				password: "password123",
+				setupMocks: func() {
+					hashedPassword, _ := hash.HashPassword("password123")
+					mockRepo.On("FindByUsername", "testuser").Return(&models.User{
+						ID:       1,
+						Username: "testuser",
+						Password: hashedPassword,
+					}, nil)
+				},
+				expectedError: nil,
+			},
+			{
+				name:     "Invalid credentials",
+				username: "testuser",
+				password: "wrongpassword",
+				setupMocks: func() {
+					hashedPassword, _ := hash.HashPassword("password123")
+					mockRepo.On("FindByUsername", "testuser").Return(&models.User{
+						Username: "testuser",
+						Password: hashedPassword,
+					}, nil)
+				},
+				expectedError: errors.New("invalid credentials"),
+			},
+		}
+	
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				mockRepo.ExpectedCalls = nil
+				mockRepo.Calls = nil
+				tt.setupMocks()
+	
+				token, err := service.Login(tt.username, tt.password)
+	
+				if tt.expectedError != nil {
+					assert.EqualError(t, err, tt.expectedError.Error())
+					assert.Empty(t, token)
+				} else {
+					assert.NoError(t, err)
+					assert.NotEmpty(t, token)
+				}
+				mockRepo.AssertExpectations(t)
+			})
+		}
+	}
+	`
+
+	userHandlerTestTemplate = `package handlers
+	
+	import (
+		"testing"
+		"bytes"
+		"encoding/json"
+		"errors"
+		"github.com/gofiber/fiber/v2"
+		"github.com/stretchr/testify/assert"
+		"github.com/stretchr/testify/mock"
+		"your-project-name/models"
+	)
+	
+	// MockUserService is a mock type for the UserService
+	type MockUserService struct {
+		mock.Mock
+	}
+	
+	func (m *MockUserService) Register(user *models.User) error {
+		args := m.Called(user)
+		return args.Error(0)
+	}
+	
+	func (m *MockUserService) Login(username, password string) (string, error) {
+		args := m.Called(username, password)
+		return args.String(0), args.Error(1)
+	}
+	
+	func (m *MockUserService) GetUserById(userId int64) (*models.User, error) {
+		args := m.Called(userId)
+		if args.Get(0) == nil {
+			return nil, args.Error(1)
+		}
+		return args.Get(0).(*models.User), args.Error(1)
+	}
+	
+	func TestUserHandler_Register(t *testing.T) {
+		tests := []struct {
+			name           string
+			requestBody    interface{}
+			setupMocks     func(*MockUserService)
+			expectedStatus int
+			expectedBody   string
+		}{
+			{
+				name: "Successful registration",
+				requestBody: map[string]string{
+					"username": "testuser",
+					"email":    "test@example.com",
+					"password": "password123",
+				},
+				setupMocks: func(ms *MockUserService) {
+					ms.On("Register", mock.AnythingOfType("*models.User")).Return(nil)
+				},
+				expectedStatus: fiber.StatusCreated,
+				expectedBody:   ` + "`" + `{"id":0,"username":"testuser","email":"test@example.com","password":""}` + "`" + `,
+			},
+			{
+				name: "Invalid request body",
+				requestBody: map[string]string{
+					"invalid": "json",
+				},
+				setupMocks: func(ms *MockUserService) {},
+				expectedStatus: fiber.StatusBadRequest,
+				expectedBody:   ` + "`" + `{"error":"Invalid request body"}` + "`" + `,
+			},
+		}
+	
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				// Setup
+				app := fiber.New()
+				mockService := new(MockUserService)
+				tt.setupMocks(mockService)
+				handler := NewUserHandler(mockService)
+	
+				// Create request
+				body, _ := json.Marshal(tt.requestBody)
+				req := httptest.NewRequest("POST", "/api/auth/register", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+	
+				// Perform request
+				resp, _ := app.Test(req)
+	
+				// Assert response
+				assert.Equal(t, tt.expectedStatus, resp.StatusCode)
+				
+				body, _ = ioutil.ReadAll(resp.Body)
+				assert.JSONEq(t, tt.expectedBody, string(body))
+				
+				mockService.AssertExpectations(t)
+			})
+		}
+	}
+	
+	func TestUserHandler_Login(t *testing.T) {
+		tests := []struct {
+			name           string
+			requestBody    interface{}
+			setupMocks     func(*MockUserService)
+			expectedStatus int
+			expectedBody   string
+		}{
+			{
+				name: "Successful login",
+				requestBody: map[string]string{
+					"username": "testuser",
+					"password": "password123",
+				},
+				setupMocks: func(ms *MockUserService) {
+					ms.On("Login", "testuser", "password123").Return("jwt-token", nil)
+				},
+				expectedStatus: fiber.StatusOK,
+				expectedBody:   ` + "`" + `{"token":"jwt-token"}` + "`" + `,
+			},
+			{
+				name: "Invalid credentials",
+				requestBody: map[string]string{
+					"username": "testuser",
+					"password": "wrongpassword",
+				},
+				setupMocks: func(ms *MockUserService) {
+					ms.On("Login", "testuser", "wrongpassword").Return("", errors.New("invalid credentials"))
+				},
+				expectedStatus: fiber.StatusUnauthorized,
+				expectedBody:   ` + "`" + `{"error":"Invalid credentials"}` + "`" + `,
+			},
+		}
+	
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				// Setup
+				app := fiber.New()
+				mockService := new(MockUserService)
+				tt.setupMocks(mockService)
+				handler := NewUserHandler(mockService)
+	
+				// Create request
+				body, _ := json.Marshal(tt.requestBody)
+				req := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+	
+				// Perform request
+				resp, _ := app.Test(req)
+	
+				// Assert response
+				assert.Equal(t, tt.expectedStatus, resp.StatusCode)
+				
+				body, _ = ioutil.ReadAll(resp.Body)
+				assert.JSONEq(t, tt.expectedBody, string(body))
+				
+				mockService.AssertExpectations(t)
+			})
+		}
+	}
+`
 )
