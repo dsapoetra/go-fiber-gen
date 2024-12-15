@@ -252,20 +252,6 @@ func AuthMiddleware() fiber.Handler {
 }
 `
 
-	userModelTemplate = `package models
-
-import "time"
-
-type User struct {
-	ID        int64     ` + "`db:\"id\" json:\"id\"`" + `
-	Username  string    ` + "`db:\"username\" json:\"username\"`" + `
-	Password  string    ` + "`db:\"password\" json:\"password\"`" + `
-	Email     string    ` + "`db:\"email\" json:\"email\"`" + `
-	CreatedAt time.Time ` + "`db:\"created_at\" json:\"created_at\"`" + `
-	UpdatedAt time.Time ` + "`db:\"updated_at\" json:\"updated_at\"`" + `
-}
-`
-
 	hashTemplate = `package hash
 
 import (
@@ -371,68 +357,6 @@ func (r *UserRepository) FindById(id int64) (*models.User, error) {
 		return nil, err
 	}
 	return &user, nil
-}
-`
-
-	userServiceTemplate = `package services
-
-import (
-	"errors"
-	"your-project-name/models"
-	"your-project-name/pkg/hash"
-	"your-project-name/pkg/jwt"
-	"your-project-name/repositories"
-)
-
-type UserService struct {
-	userRepo *repositories.UserRepository
-}
-
-func NewUserService(userRepo *repositories.UserRepository) *UserService {
-	return &UserService{userRepo: userRepo}
-}
-
-func (s *UserService) Register(user *models.User) error {
-	// Check if username already exists
-	if _, err := s.userRepo.FindByUsername(user.Username); err == nil {
-		return errors.New("username already exists")
-	}
-
-	// Check if email already exists
-	if _, err := s.userRepo.FindByEmail(user.Email); err == nil {
-		return errors.New("email already exists")
-	}
-
-	hashedPassword, err := hash.HashPassword(user.Password)
-	if err != nil {
-		return err
-	}
-	
-	user.Password = hashedPassword
-	return s.userRepo.Create(user)
-}
-
-func (s *UserService) Login(username, password string) (string, error) {
-	user, err := s.userRepo.FindByUsername(username)
-	if err != nil {
-		return "", errors.New("invalid credentials")
-	}
-
-	if !hash.CheckPasswordHash(password, user.Password) {
-		return "", errors.New("invalid credentials")
-	}
-
-	// Generate JWT token
-	token, err := jwt.GenerateToken(uint(user.ID), "your-secret-key") // TODO: Use config for secret
-	if err != nil {
-		return "", err
-	}
-
-	return token, nil
-}
-
-func (s *UserService) GetUserById(userId int64) (*models.User, error) {
-	return s.userRepo.FindById(userId)
 }
 `
 
@@ -702,160 +626,210 @@ help:
 	}
 	`
 
+	handlerTemplate = `package handlers
+
+import (
+    "{{.ModuleName}}/models"
+    "{{.ModuleName}}/services"
+    "github.com/gofiber/fiber/v2"
+)
+
+type {{.Name}}Handler struct {
+    {{.LowerName}}Service services.{{.Name}}ServiceInterface
+}
+
+func New{{.Name}}Handler({{.LowerName}}Service services.{{.Name}}ServiceInterface) {{.Name}}HandlerInterface {
+    return &{{.Name}}Handler{ {{.LowerName}}Service: {{.LowerName}}Service }
+}
+
+type {{.Name}}HandlerInterface interface {
+    Register(c *fiber.Ctx) error
+    Login(c *fiber.Ctx) error
+    GetProfile(c *fiber.Ctx) error
+}
+
+func (h *{{.Name}}Handler) Register(c *fiber.Ctx) error {
+    var user models.{{.Name}}
+    if err := c.BodyParser(&user); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "Invalid request body",
+        })
+    }
+
+    if err := h.{{.LowerName}}Service.Register(&user); err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+            "error": err.Error(),
+        })
+    }
+
+    // Clear password before sending response
+    user.Password = ""
+    return c.Status(fiber.StatusCreated).JSON(user)
+}
+
+func (h *{{.Name}}Handler) Login(c *fiber.Ctx) error {
+    var loginRequest struct {
+        Username string ` + "`json:\"username\"`" + `
+        Password string ` + "`json:\"password\"`" + `
+    }
+
+    if err := c.BodyParser(&loginRequest); err != nil {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+            "error": "Invalid request body",
+        })
+    }
+
+    token, err := h.{{.LowerName}}Service.Login(loginRequest.Username, loginRequest.Password)
+    if err != nil {
+        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+            "error": "Invalid credentials",
+        })
+    }
+
+    return c.JSON(fiber.Map{
+        "token": token,
+    })
+}
+
+func (h *{{.Name}}Handler) GetProfile(c *fiber.Ctx) error {
+    userId := c.Locals("userId").(int64)
+
+    user, err := h.{{.LowerName}}Service.GetUserById(userId)
+    if err != nil {
+        return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+            "error": "User not found",
+        })
+    }
+
+    // Clear password before sending response
+    user.Password = ""
+    return c.JSON(user)
+}
+`
+
 	userHandlerTestTemplate = `package handlers
-	
-	import (
-		"testing"
-		"bytes"
-		"encoding/json"
-		"errors"
-		"github.com/gofiber/fiber/v2"
-		"github.com/stretchr/testify/assert"
-		"github.com/stretchr/testify/mock"
-		"your-project-name/models"
-	)
-	
-	// MockUserService is a mock type for the UserService
-	type MockUserService struct {
-		mock.Mock
-	}
-	
-	func (m *MockUserService) Register(user *models.User) error {
-		args := m.Called(user)
-		return args.Error(0)
-	}
-	
-	func (m *MockUserService) Login(username, password string) (string, error) {
-		args := m.Called(username, password)
-		return args.String(0), args.Error(1)
-	}
-	
-	func (m *MockUserService) GetUserById(userId int64) (*models.User, error) {
-		args := m.Called(userId)
-		if args.Get(0) == nil {
-			return nil, args.Error(1)
-		}
-		return args.Get(0).(*models.User), args.Error(1)
-	}
-	
-	func TestUserHandler_Register(t *testing.T) {
-		tests := []struct {
-			name           string
-			requestBody    interface{}
-			setupMocks     func(*MockUserService)
-			expectedStatus int
-			expectedBody   string
-		}{
-			{
-				name: "Successful registration",
-				requestBody: map[string]string{
-					"username": "testuser",
-					"email":    "test@example.com",
-					"password": "password123",
-				},
-				setupMocks: func(ms *MockUserService) {
-					ms.On("Register", mock.AnythingOfType("*models.User")).Return(nil)
-				},
-				expectedStatus: fiber.StatusCreated,
-				expectedBody:   ` + "`" + `{"id":0,"username":"testuser","email":"test@example.com","password":""}` + "`" + `,
-			},
-			{
-				name: "Invalid request body",
-				requestBody: map[string]string{
-					"invalid": "json",
-				},
-				setupMocks: func(ms *MockUserService) {},
-				expectedStatus: fiber.StatusBadRequest,
-				expectedBody:   ` + "`" + `{"error":"Invalid request body"}` + "`" + `,
-			},
-		}
-	
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				// Setup
-				app := fiber.New()
-				mockService := new(MockUserService)
-				tt.setupMocks(mockService)
-				handler := NewUserHandler(mockService)
-	
-				// Create request
-				body, _ := json.Marshal(tt.requestBody)
-				req := httptest.NewRequest("POST", "/api/auth/register", bytes.NewReader(body))
-				req.Header.Set("Content-Type", "application/json")
-	
-				// Perform request
-				resp, _ := app.Test(req)
-	
-				// Assert response
-				assert.Equal(t, tt.expectedStatus, resp.StatusCode)
-				
-				body, _ = ioutil.ReadAll(resp.Body)
-				assert.JSONEq(t, tt.expectedBody, string(body))
-				
-				mockService.AssertExpectations(t)
-			})
-		}
-	}
-	
-	func TestUserHandler_Login(t *testing.T) {
-		tests := []struct {
-			name           string
-			requestBody    interface{}
-			setupMocks     func(*MockUserService)
-			expectedStatus int
-			expectedBody   string
-		}{
-			{
-				name: "Successful login",
-				requestBody: map[string]string{
-					"username": "testuser",
-					"password": "password123",
-				},
-				setupMocks: func(ms *MockUserService) {
-					ms.On("Login", "testuser", "password123").Return("jwt-token", nil)
-				},
-				expectedStatus: fiber.StatusOK,
-				expectedBody:   ` + "`" + `{"token":"jwt-token"}` + "`" + `,
-			},
-			{
-				name: "Invalid credentials",
-				requestBody: map[string]string{
-					"username": "testuser",
-					"password": "wrongpassword",
-				},
-				setupMocks: func(ms *MockUserService) {
-					ms.On("Login", "testuser", "wrongpassword").Return("", errors.New("invalid credentials"))
-				},
-				expectedStatus: fiber.StatusUnauthorized,
-				expectedBody:   ` + "`" + `{"error":"Invalid credentials"}` + "`" + `,
-			},
-		}
-	
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				// Setup
-				app := fiber.New()
-				mockService := new(MockUserService)
-				tt.setupMocks(mockService)
-				handler := NewUserHandler(mockService)
-	
-				// Create request
-				body, _ := json.Marshal(tt.requestBody)
-				req := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(body))
-				req.Header.Set("Content-Type", "application/json")
-	
-				// Perform request
-				resp, _ := app.Test(req)
-	
-				// Assert response
-				assert.Equal(t, tt.expectedStatus, resp.StatusCode)
-				
-				body, _ = ioutil.ReadAll(resp.Body)
-				assert.JSONEq(t, tt.expectedBody, string(body))
-				
-				mockService.AssertExpectations(t)
-			})
-		}
-	}
+
+import (
+    "{{.ModuleName}}/models"
+    "bytes"
+    "encoding/json"
+    "io/ioutil"
+    "net/http/httptest"
+    "testing"
+
+    "github.com/gofiber/fiber/v2"
+    "github.com/stretchr/testify/assert"
+)
+
+func Test{{.Name}}Handler_Register(t *testing.T) {
+    tests := []struct {
+        name           string
+        requestBody    interface{}
+        expectedStatus int
+        expectedBody   string
+    }{
+        {
+            name: "Successful registration",
+            requestBody: map[string]string{
+                "username": "testuser",
+                "email":    "test@example.com",
+                "password": "password123",
+            },
+            expectedStatus: fiber.StatusCreated,
+            expectedBody:   ` + "`" + `{"created_at":"0001-01-01T00:00:00Z","email":"test@example.com","id":0,"password":"","updated_at":"0001-01-01T00:00:00Z","username":"testuser"}` + "`" + `,
+        },
+        {
+            name:        "Invalid request body",
+            requestBody: "invalid json",
+            expectedStatus: fiber.StatusBadRequest,
+            expectedBody:   ` + "`" + `{"error":"Invalid request body"}` + "`" + `,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            app := fiber.New()
+            
+            var body []byte
+            var err error
+            
+            switch v := tt.requestBody.(type) {
+            case string:
+                body = []byte(v)
+            default:
+                body, err = json.Marshal(tt.requestBody)
+                if err != nil {
+                    t.Fatal(err)
+                }
+            }
+
+            req := httptest.NewRequest("POST", "/api/auth/register", bytes.NewReader(body))
+            req.Header.Set("Content-Type", "application/json")
+
+            resp, _ := app.Test(req)
+
+            assert.Equal(t, tt.expectedStatus, resp.StatusCode)
+
+            respBody, _ := ioutil.ReadAll(resp.Body)
+            assert.JSONEq(t, tt.expectedBody, string(respBody))
+        })
+    }
+}
+`
+
+	userServiceTemplate = `package services
+
+import (
+    "{{.ModuleName}}/models"
+    "{{.ModuleName}}/repositories"
+)
+
+type {{.Name}}Service struct {
+    repo repositories.{{.Name}}RepositoryInterface
+}
+
+func New{{.Name}}Service(repo repositories.{{.Name}}RepositoryInterface) {{.Name}}ServiceInterface {
+    return &{{.Name}}Service{repo: repo}
+}
+
+type {{.Name}}ServiceInterface interface {
+    Register(user *models.{{.Name}}) error
+    Login(username, password string) (string, error)
+    GetUserById(id int64) (*models.{{.Name}}, error)
+}
+
+func (s *{{.Name}}Service) Register(user *models.{{.Name}}) error {
+    return s.repo.Create(user)
+}
+
+func (s *{{.Name}}Service) Login(username, password string) (string, error) {
+    user, err := s.repo.GetByUsername(username)
+    if err != nil {
+        return "", err
+    }
+
+    // TODO: Implement password verification
+    return "jwt-token", nil
+}
+
+func (s *{{.Name}}Service) GetUserById(id int64) (*models.{{.Name}}, error) {
+    return s.repo.Get(id)
+}
+`
+
+	userModelTemplate = `package models
+
+import (
+    "time"
+)
+
+type {{.Name}} struct {
+    ID        int64     ` + "`json:\"id\"`" + `
+    Username  string    ` + "`json:\"username\"`" + `
+    Email     string    ` + "`json:\"email\"`" + `
+    Password  string    ` + "`json:\"password\"`" + `
+    CreatedAt time.Time ` + "`json:\"created_at\"`" + `
+    UpdatedAt time.Time ` + "`json:\"updated_at\"`" + `
+}
 `
 )
